@@ -31,5 +31,4 @@ RUN pip install -r requirements_versions.txt
 
 # Execute.
 EXPOSE 7860
-EXPOSE 7861
-CMD ["python3", "/opt/awoo/diffusion/stable-diffusion-webui/launch.py", "--listen"]
+CMD ["python3", "/opt/awoo/diffusion/stable-diffusion-webui/launch.py", "--listen", "--api"]
