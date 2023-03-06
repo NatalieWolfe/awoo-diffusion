@@ -1,6 +1,6 @@
 import axios, { AxiosResponse } from 'axios';
 
-const SD_HOST = 'localhost:32777';
+const SD_HOST = process.env.SD_HOST || 'localhost:7860';
 
 // TODO: Image dimensions can be any multiple of 8.
 type ImageDimension = 256 | 512 | 1024;
@@ -24,7 +24,6 @@ type SamplingMethod =
   'DPM++ SDE Karras' |
   'DDIM' |
   'PLMS';
-
 
 export interface Txt2ImgRequest {
   prompt: string;

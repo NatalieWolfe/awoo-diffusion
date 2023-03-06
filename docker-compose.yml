@@ -17,3 +17,10 @@ services:
               capabilities: [gpu]
     ports:
       - 7860:7860
+  sidecar:
+    build: .
+    depends_on:
+      - sd_web_ui
+    environment:
+      - SHITBOT_HOST
+      - SD_HOST=sd_web_ui:7860

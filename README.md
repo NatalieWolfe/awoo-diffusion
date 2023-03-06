@@ -44,3 +44,9 @@ the `sd_web_ui` service. The container will expose port `7860` on the host.
 ```sh
 sudo docker compose build sd_web_ui && sudo docker compose up sd_web_ui
 ```
+
+## Running the sidecar in compose
+
+Read the information about configuring host storage above, and then create a
+`.env` file with `SHITBOT_HOST` set to the `host:port` combo for the shit bot
+machine. Then run `docker compose up` to start both the SD and Sidecar services.
