@@ -1,0 +1,19 @@
+version: "3.8"
+services:
+  sd_web_ui:
+    build:
+      dockerfile: ./sd-web-ui.dockerfile
+      target: sd_host_storage
+    environment:
+      - DATA_ROOT=/var/sd_web_ui
+    volumes:
+      - /var/sd_web_ui:/var/sd_web_ui:rw
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    ports:
+      - 7860:7860
