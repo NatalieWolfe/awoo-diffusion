@@ -18,7 +18,8 @@ services:
     ports:
       - 7860:7860
   sidecar:
-    build: .
+    build:
+      dockerfile: ./sidecar.dockerfile
     depends_on:
       - sd_web_ui
     environment:
