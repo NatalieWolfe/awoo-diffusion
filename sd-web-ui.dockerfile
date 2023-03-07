@@ -34,7 +34,7 @@ RUN pip install -r requirements_versions.txt
 
 # Execute.
 EXPOSE 7860
-CMD ["python3", "launch.py", "--listen", "--api"]
+CMD ["python3", "launch.py", "--listen", "--api", "--enable-insecure-extension-access"]
 
 ################################################################################
 # This part of the image is used as a compose unit with host machine storage for
