@@ -25,3 +25,6 @@ services:
     environment:
       - SHITBOT_HOST
       - SD_HOST=sd_web_ui:7860
+      - SD_ROOT=/var/sd_web_ui
+    volumes:
+      - /var/sd_web_ui:/var/sd_web_ui:rw

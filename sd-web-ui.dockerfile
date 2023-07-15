@@ -17,7 +17,9 @@ USER awoo
 
 # Get the Web UI
 WORKDIR ${PROGRAM_ROOT}
-RUN git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui
+RUN git clone https://github.com/AUTOMATIC1111/stable-diffusion-webui && \
+    cd stable-diffusion-webui && \
+    git checkout f865d3e11647dfd6c7b2cdf90dde24680e58acd8
 
 # Get the dependency repositories.
 WORKDIR ${PROGRAM_ROOT}/stable-diffusion-webui/repositories
