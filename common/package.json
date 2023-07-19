@@ -1,0 +1,12 @@
+{
+  "name": "common",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/common.mjs",
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@types/node": "^18.16.19",
+    "typescript": "^5.1.6"
+  }
+}

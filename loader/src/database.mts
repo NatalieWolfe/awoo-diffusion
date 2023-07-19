@@ -2,7 +2,8 @@ import * as mariadb from 'mariadb';
 import {promises as fs} from 'node:fs';
 import {Readable} from 'node:stream';
 
-import {getSecret} from './secrets.mjs';
+import {secrets} from 'common';
+
 import {Post, PostSelection, Rating} from './schema/types.mjs';
 
 const SCHEMA_VERSION = 1;
@@ -292,7 +293,7 @@ export async function openDatabase(): Promise<Database> {
     port: parseInt(process.env.AWOO_DATABASE_PORT, 10) || 3306,
     database: 'awoo',
     user: 'awoo',
-    password: await getSecret('database-password'),
+    password: await secrets.getSecret('database-password'),
     bigIntAsNumber: true
   };
   const schemaVersion = await _getSchemaVersion(config);
