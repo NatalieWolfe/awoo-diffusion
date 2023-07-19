@@ -28,3 +28,15 @@ services:
       - SD_ROOT=/var/sd_web_ui
     volumes:
       - /var/sd_web_ui:/var/sd_web_ui:rw
+  mariadb:
+    image: mariadb:10
+    volumes:
+      - /var/awoo/database:/var/lib/mysql:rw
+      - ./secrets:/var/secrets
+    environment:
+      - MARIADB_DATABASE=awoo
+      - MARIADB_USER=awoo
+      - MARIADB_PASSWORD_FILE=/var/secrets/database-password
+      - MARIADB_ROOT_PASSWORD_FILE=/var/secrets/database-root-password
+    ports:
+      - 3306:3306
