@@ -1,6 +1,7 @@
 {
   "scripts": {
-    "compile": "tsc"
+    "compile": "tsc",
+    "start": "tsc && node src/loader.mjs"
   },
   "dependencies": {
     "@types/node": "^18.14.6",

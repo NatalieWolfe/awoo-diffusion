@@ -45,6 +45,8 @@ interface DumpPost {
 
 const MINIMUM_SCORE = 300;
 const MINIMUM_FAVCOUNT = 500;
+const COMBINED_MINIMUM_SCORE = 100;
+const COMBINED_MINIMUM_FAVCOUNT = 300;
 
 const EXCLUDED_TAGS = new Set([
   '2d_animation',
@@ -280,7 +282,6 @@ class PostBuffer extends EventEmitter {
       // Wait for prior save to finish before doing this one.
       this.emit('pause');
       ++this.pauseDepth;
-      console.log('Pause!');
       await this.results[this.results.length - 1];
     }
     this.total += posts.length;
@@ -294,7 +295,6 @@ class PostBuffer extends EventEmitter {
     }
 
     if (--this.pauseDepth <= 0) {
-      console.log('Resume!');
       this.emit('resume');
     }
   }
@@ -306,10 +306,7 @@ async function selector() {
   const postsToSelect = new Set<PostSelection>();
   const postsToRemove = new Set<number>();
   for await (postSelection of await db.listPostSelections()) {
-    if (
-      postSelection.score >= MINIMUM_SCORE ||
-      postSelection.favCount >= MINIMUM_FAVCOUNT
-    ) {
+    if (!postSelection.isDeleted && acceptablePost(postSelection)) {
       if (!postSelection.isSelected) postsToSelect.add(postSelection);
     } else if (postSelection.isSelected) {
       postsToRemove.add(postSelection.postId);
@@ -322,6 +319,22 @@ async function selector() {
   );
   await db.updatePostSelections({add: postsToSelect, remove: postsToRemove});
   await db.close();
+}
+
+function acceptablePost(post: PostSelection): boolean {
+  if (!post.score || !post.favCount) {
+    return false;
+  }
+  if (post.score >= MINIMUM_SCORE || post.favCount >= MINIMUM_FAVCOUNT) {
+    return true;
+  }
+  if (
+    post.score >= COMBINED_MINIMUM_SCORE &&
+    post.favCount >= COMBINED_MINIMUM_FAVCOUNT
+  ) {
+    return true;
+  }
+  return false;
 }
 
 loader().then(selector);

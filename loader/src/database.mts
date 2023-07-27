@@ -2,9 +2,9 @@ import * as mariadb from 'mariadb';
 import {promises as fs} from 'node:fs';
 import {Readable} from 'node:stream';
 
-import {secrets} from 'common';
+import {BaseDatabase, getConfig} from 'common/src/database.mjs';
 
-import {Post, PostSelection, Rating} from './schema/types.mjs';
+import {Post, PostSelection} from './schema/types.mjs';
 
 const SCHEMA_VERSION = 1;
 const SCHEMA_DIR = './src/schema';
@@ -30,13 +30,11 @@ interface PostUpdateSummaryRow {
   fav_count: number
 }
 
-export class Database {
+export class Database extends BaseDatabase {
   private readonly tagCache = new Map<string, number>();
 
-  constructor(private readonly pool: mariadb.Pool) {}
-
   async insertPosts(posts: Post[]): Promise<Post[]> {
-    return await this._withConn(this._insertPosts.bind(this, posts));
+    return await this.withConnection(this._insertPosts.bind(this, posts));
   }
 
   async listPostSelections(): Promise<Readable> {
@@ -47,19 +45,20 @@ export class Database {
         posts.rating,
         posts.score,
         posts.fav_count AS favCount,
+        posts.is_deleted AS isDeleted,
         selectable_posts.is_downloaded IS TRUE AS isDownloaded,
         selectable_posts.is_downloaded IS NOT NULL AS isSelected
       FROM posts
       LEFT JOIN selectable_posts USING (post_id);
     `);
-    _releaseOnEnd(conn, stream);
+    this.releaseOnEnd(conn, stream);
     return stream;
   }
 
   async updatePostSelections(
     {add, remove}: {add: Set<PostSelection>, remove: Set<number>}
   ) {
-    return await this._withConn(async (conn: mariadb.PoolConnection) => {
+    return await this.withConnection(async (conn: mariadb.PoolConnection) => {
       await conn.beginTransaction();
       if (remove && remove.size) {
         await conn.execute(`
@@ -101,11 +100,13 @@ export class Database {
         ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
         ?
       ) ON DUPLICATE KEY UPDATE
-        parent_id = ?,        updated_at = ?,       rating = ?,
-        comment_count = ?,    description = ?,      score = ?,
-        up_score = ?,         down_score = ?,       fav_count = ?,
-        is_deleted = ?,       is_pending = ?,       is_flagged = ?,
-        is_rating_locked = ?, is_status_locked = ?, is_note_locked = ?
+        parent_id = ?,        md5 = ?,            updated_at = ?,
+        rating = ?,           image_width = ?,    image_height = ?,
+        file_ext = ?,         file_size = ?,      comment_count = ?,
+        description = ?,      score = ?,          up_score = ?,
+        down_score = ?,       fav_count = ?,      is_deleted = ?,
+        is_pending = ?,       is_flagged = ?,     is_rating_locked = ?,
+        is_status_locked = ?, is_note_locked = ?
     `);
     const insertPostTag = await conn.prepare(
       `INSERT INTO deferred_post_tags_queue (post_id, tag_id) VALUES (?, ?)`
@@ -120,7 +121,7 @@ export class Database {
     for (
       const storedPost of
       await conn.execute<PostUpdateSummaryRow[]>(`
-        SELECT post_id, updated_at, up_score, down_score, fav_count
+        SELECT post_id, file_ext, updated_at, up_score, down_score, fav_count
         FROM posts
         WHERE post_id IN (?${(new Array(posts.length)).join(', ?')})
       `, posts.map((post) => post.postId))
@@ -157,11 +158,13 @@ export class Database {
           post.isFlagged,       post.isRatingLocked,  post.isStatusLocked,
           post.isNoteLocked,
           // Update values.
-          post.parentId,        post.updatedAt,       post.rating,
-          post.commentCount,    post.description,     post.score,
-          post.upScore,         post.downScore,       post.favCount,
-          post.isDeleted,       post.isPending,       post.isFlagged,
-          post.isRatingLocked,  post.isStatusLocked,  post.isNoteLocked
+          post.parentId,        post.md5,             post.updatedAt,
+          post.rating,          post.imageWidth,      post.imageHeight,
+          post.fileExt,         post.fileSize,        post.commentCount,
+          post.description,     post.score,           post.upScore,
+          post.downScore,       post.favCount,        post.isDeleted,
+          post.isPending,       post.isFlagged,       post.isRatingLocked,
+          post.isStatusLocked,  post.isNoteLocked
         ]);
 
         const tags = await this._getTags(post.tags, conn);
@@ -263,39 +266,10 @@ export class Database {
         ${(new Array(posts.length)).join(', (?, ?, false, ?)')}
     `, values);
   }
-
-  private async _withConn<T>(
-    func: (conn: mariadb.PoolConnection) => Promise<T>
-  ): Promise<T> {
-    const conn = await this.pool.getConnection();
-    try {
-      const res = await func(conn);
-      await conn.release();
-      return res;
-    } catch (e) {
-      if (conn.isValid()) {
-        try {
-          await conn.reset();
-          await conn.release();
-        } catch (resetError) {
-          console.log('Failed to reset/release conn after error: ', resetError);
-          conn.destroy();
-        }
-      }
-      throw e;
-    }
-  }
 }
 
 export async function openDatabase(): Promise<Database> {
-  const config: mariadb.PoolConfig = {
-    host: process.env.AWOO_DATABASE_HOST,
-    port: parseInt(process.env.AWOO_DATABASE_PORT, 10) || 3306,
-    database: 'awoo',
-    user: 'awoo',
-    password: await secrets.getSecret('database-password'),
-    bigIntAsNumber: true
-  };
+  const config = await getConfig();
   const schemaVersion = await _getSchemaVersion(config);
   if (schemaVersion === 0) {
     await _initializeSchema(config);
@@ -347,14 +321,3 @@ async function _upgradeSchema(
   config: mariadb.ConnectionConfig,
   schemaVersion: number
 ) {}
-
-function _releaseOnEnd(conn: mariadb.PoolConnection, stream: Readable) {
-  const releaser = () => {
-    conn.release();
-    stream.removeListener('end', releaser);
-    stream.removeListener('error', releaser);
-  };
-
-  stream.once('end', releaser);
-  stream.once('error', releaser);
-}

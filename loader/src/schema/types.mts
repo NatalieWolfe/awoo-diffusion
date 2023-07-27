@@ -35,6 +35,7 @@ export interface PostSelection {
   rating: Rating
   score: number,
   favCount: number,
+  isDeleted: boolean,
   isDownloaded: boolean,
   isSelected: boolean
 }
