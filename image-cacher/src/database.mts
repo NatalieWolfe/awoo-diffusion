@@ -10,23 +10,17 @@ export interface DownloadablePost {
 }
 
 export class Database extends database.BaseDatabase {
-  async listPostsToDownload(): Promise<Readable> {
-    const conn = await this.pool.getConnection();
-    const stream = conn.queryStream(`
-      SELECT
-        posts.post_id AS postId,
-        posts.md5,
-        posts.file_ext AS extension
-      FROM selectable_posts
-      LEFT JOIN posts USING (post_id)
-      WHERE NOT selectable_posts.is_downloaded
-      ORDER BY selectable_posts.computed_score DESC
-    `);
-    this.releaseOnEnd(conn, stream);
-    return stream;
+  listPostsToDownload(): Promise<Readable> {
+    return this._listDownloadablePosts(/*isDownloaded=*/false);
   }
 
-  async listDownloadedPosts(): Promise<Readable> {
+  listDownloadedPosts(): Promise<Readable> {
+    return this._listDownloadablePosts(/*isDownloaded=*/true);
+  }
+
+  private async _listDownloadablePosts(
+    isDownloaded: boolean
+  ): Promise<Readable> {
     const conn = await this.pool.getConnection();
     const stream = conn.queryStream(`
       SELECT
@@ -35,7 +29,7 @@ export class Database extends database.BaseDatabase {
         posts.file_ext AS extension
       FROM selectable_posts
       LEFT JOIN posts USING (post_id)
-      WHERE selectable_posts.is_downloaded
+      WHERE ${isDownloaded ? '' : 'NOT'} selectable_posts.is_downloaded
       ORDER BY selectable_posts.computed_score DESC
     `);
     this.releaseOnEnd(conn, stream);
@@ -43,7 +37,7 @@ export class Database extends database.BaseDatabase {
   }
 
   async markPostDownloaded(postId: number) {
-    await this.withConnection(
+    await this.retriable(
       async (conn) => {
         conn.execute(
           'UPDATE selectable_posts SET is_downloaded = TRUE WHERE post_id = ?',
@@ -54,7 +48,7 @@ export class Database extends database.BaseDatabase {
   }
 
   async unmarkPostDownloaded(postId: number) {
-    await this.withConnection(
+    await this.retriable(
       async (conn) => {
         conn.execute(
           'UPDATE selectable_posts SET is_downloaded = FALSE WHERE post_id = ?',
