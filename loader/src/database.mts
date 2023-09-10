@@ -30,6 +30,11 @@ interface PostUpdateSummaryRow {
   fav_count: number
 }
 
+interface TagDiff {
+  addedTags: number[],
+  removedTags: number[]
+}
+
 export class Database extends BaseDatabase {
   private readonly tagCache = new Map<string, number>();
 
@@ -60,21 +65,37 @@ export class Database extends BaseDatabase {
   ) {
     return await this.withConnection(async (conn: mariadb.PoolConnection) => {
       await conn.beginTransaction();
+      const BLOCK_SIZE = 20000;
       if (remove && remove.size) {
-        await conn.execute(`
-          DELETE FROM selectable_posts
-          WHERE post_id IN (?${(new Array(remove.size)).join(', ?')})
-        `, [...remove]);
+        const removeArray = [...remove];
+        for (let i = 0; i < remove.size; i+= BLOCK_SIZE) {
+          const toRemove = removeArray.slice(i, i + BLOCK_SIZE);
+          await conn.execute(`
+            DELETE FROM selectable_posts
+            WHERE post_id IN (${_makePlaceholders(toRemove.length)})
+          `, toRemove);
+        }
       }
 
       if (add && add.size) {
-        const BLOCK_SIZE = 100;
         const addArray = [...add];
         for (let i = 0; i < add.size; i += BLOCK_SIZE) {
           await this._insertSelections(conn, addArray.slice(i, i + BLOCK_SIZE));
         }
       }
       await conn.commit();
+    });
+  }
+
+  listTags(postId: number): Promise<string[]> {
+    return this.withConnection(async (conn) => {
+      const tagRows = await conn.execute<TagsRow[]>(`
+        SELECT tag_id, tag
+        FROM post_tags
+        LEFT JOIN tags USING (tag_id)
+        WHERE post_tags.post_id = ?
+      `, [postId]);
+      return tagRows.map((tagRow) => tagRow.tag);
     });
   }
 
@@ -108,9 +129,6 @@ export class Database extends BaseDatabase {
         is_pending = ?,       is_flagged = ?,     is_rating_locked = ?,
         is_status_locked = ?, is_note_locked = ?
     `);
-    const insertPostTag = await conn.prepare(
-      `INSERT INTO deferred_post_tags_queue (post_id, tag_id) VALUES (?, ?)`
-    );
     const removePostSources =
       await conn.prepare(`DELETE FROM post_sources WHERE post_id = ?`);
     const insertPostSource = await conn.prepare(
@@ -123,7 +141,7 @@ export class Database extends BaseDatabase {
       await conn.execute<PostUpdateSummaryRow[]>(`
         SELECT post_id, file_ext, updated_at, up_score, down_score, fav_count
         FROM posts
-        WHERE post_id IN (?${(new Array(posts.length)).join(', ?')})
+        WHERE post_id IN (${_makePlaceholders(posts.length)})
       `, posts.map((post) => post.postId))
     ) {
       storedPosts.set(storedPost.post_id, storedPost)
@@ -134,16 +152,15 @@ export class Database extends BaseDatabase {
     for (const post of posts) {
       try {
         const storedPost = storedPosts.get(post.postId)
-        if (storedPost) {
-          if (
-            storedPost.updated_at?.getTime() === post.updatedAt?.getTime() &&
-            storedPost.up_score === post.upScore &&
-            storedPost.down_score === post.downScore &&
-            storedPost.fav_count === post.favCount
-          ) {
-            ++skipCount;
-            continue;
-          }
+        if (
+          storedPost &&
+          storedPost.updated_at?.getTime() === post.updatedAt?.getTime() &&
+          storedPost.up_score === post.upScore &&
+          storedPost.down_score === post.downScore &&
+          storedPost.fav_count === post.favCount
+        ) {
+          ++skipCount;
+          continue;
         }
 
         await insertPost.execute([
@@ -167,9 +184,14 @@ export class Database extends BaseDatabase {
           post.isStatusLocked,  post.isNoteLocked
         ]);
 
-        const tags = await this._getTags(post.tags, conn);
-        for (const tagId of tags.values()) {
-          await insertPostTag.execute([post.postId, tagId]);
+        const tags = await this._getTags(conn, post.tags);
+        const tagDiff =
+          await this._diffPostTags(conn, post.postId, [...tags.values()]);
+        if (tagDiff.addedTags.length) {
+          await this._addPostTags(conn, post.postId, tagDiff.addedTags);
+        }
+        if (tagDiff.removedTags.length) {
+          await this._removePostTags(conn, post.postId, tagDiff.removedTags);
         }
 
         await removePostSources.execute([post.postId]);
@@ -194,8 +216,8 @@ export class Database extends BaseDatabase {
   }
 
   private async _getTags(
-    tagNames: string[],
-    conn: mariadb.PoolConnection
+    conn: mariadb.PoolConnection,
+    tagNames: string[]
   ): Promise<Map<string, number>> {
     // Check the in-memory cache for loaded tags.
     const tagMap = new Map<string, number>();
@@ -214,7 +236,7 @@ export class Database extends BaseDatabase {
       let tags = await conn.execute<TagsRow[]>(`
         SELECT tag_id, tag
         FROM tags
-        WHERE tag IN (?${(new Array(uncachedTags.size)).join(', ?')})
+        WHERE tag IN (${_makePlaceholders(uncachedTags.size)})
       `, [...uncachedTags]);
       for (const tag of tags) {
         uncachedTags.delete(tag.tag);
@@ -225,15 +247,14 @@ export class Database extends BaseDatabase {
       if (uncachedTags.size) {
         // Insert and reload the tags that are new.
         const newTags = [...uncachedTags];
-        const placeholders = new Array(newTags.length);
-        await conn.execute(
-          `INSERT INTO tags (tag) VALUES (?)${placeholders.join(', (?)')}`,
-          newTags
-        );
+        await conn.execute(`
+          INSERT INTO tags (tag)
+          VALUES ${_makePlaceholders(newTags.length), '(?)'}
+        `, newTags);
         tags = await conn.execute<TagsRow[]>(`
           SELECT tag_id, tag
           FROM tags
-          WHERE tag IN (?${(new Array(newTags.length)).join(', ?')})
+          WHERE tag IN (${_makePlaceholders(newTags.length)})
         `, newTags);
         for (const tag of tags) {
           tagMap.set(tag.tag, tag.tag_id);
@@ -261,10 +282,56 @@ export class Database extends BaseDatabase {
       INSERT IGNORE selectable_posts (
         post_id, computed_score, is_downloaded, rating
       )
-      VALUES
-        (?, ?, false, ?)
-        ${(new Array(posts.length)).join(', (?, ?, false, ?)')}
+      VALUES ${_makePlaceholders(posts.length, '(?, ?, false, ?)')}
     `, values);
+  }
+
+  private async _diffPostTags(
+    conn: mariadb.PoolConnection,
+    postId: number,
+    tagIds: number[]
+  ): Promise<TagDiff> {
+    const loadedTagIds = new Set(tagIds);
+    const storedTagRows = await conn.execute<{tag_id: number}[]>(
+      `SELECT tag_id FROM post_tags WHERE post_id = ?`,
+      [postId]
+    );
+    const storedTagIds = new Set(storedTagRows.map((tag) => tag.tag_id));
+    const diff = {addedTags: [], removedTags: []};
+    for (const tagId of loadedTagIds) {
+      if (!storedTagIds.has(tagId)) diff.addedTags.push(tagId);
+    }
+    for (const tagId of storedTagIds) {
+      if (!loadedTagIds.has(tagId)) diff.removedTags.push(tagId);
+    }
+    return diff;
+  }
+
+  private async _addPostTags(
+    conn: mariadb.PoolConnection,
+    postId: number,
+    tagIds: number[]
+  ) {
+    const values = [];
+    for (const tagId of tagIds) {
+      values.push(postId, tagId);
+    }
+    await conn.execute(`
+      INSERT INTO post_tags (post_id, tag_id)
+      VALUES ${_makePlaceholders(tagIds.length, '(?, ?)')}
+    `, values);
+  }
+
+  private async _removePostTags(
+    conn: mariadb.PoolConnection,
+    postId: number,
+    tagIds: number[]
+  ) {
+    await conn.execute(`
+      DELETE FROM post_tags
+      WHERE post_id = ?
+      AND tag_id IN (${_makePlaceholders(tagIds.length)})
+    `, [postId, ...tagIds]);
   }
 }
 
@@ -279,6 +346,15 @@ export async function openDatabase(): Promise<Database> {
     throw new Error('Database schema is ahead of expected version.');
   }
   return new Database(mariadb.createPool(config));
+}
+
+function _makePlaceholders(count: number, placeholder = '?'): string {
+  if (count === 0) {
+    return '';
+  } else if (count === 1) {
+    return placeholder;
+  }
+  return placeholder + (new Array(count)).join(`, ${placeholder}`);
 }
 
 async function _getSchemaVersion(
