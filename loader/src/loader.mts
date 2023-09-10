@@ -220,15 +220,7 @@ async function loader() {
   stream.on('readable', () => {
     let post: Post;
     while ((post = stream.read()) !== null) {
-      let skip = false;
-      for (const tag of post.tags) {
-        if (EXCLUDED_TAGS.has(tag)) {
-          skip = true;
-          break;
-        }
-      }
-      if (skip || !validatePost(post)) continue;
-      buffer.add(post);
+      if (validatePost(post)) buffer.add(post);
     }
   });
 
@@ -305,11 +297,26 @@ async function selector() {
   let postSelection: PostSelection;
   const postsToSelect = new Set<PostSelection>();
   const postsToRemove = new Set<number>();
+  let postCount = 0;
+  let lastReport = 0;
   for await (postSelection of await db.listPostSelections()) {
-    if (!postSelection.isDeleted && acceptablePost(postSelection)) {
-      if (!postSelection.isSelected) postsToSelect.add(postSelection);
+    if (
+      !postSelection.isDeleted &&
+      acceptablePost(postSelection) &&
+      hasAcceptableTags(await db.listTags(postSelection.postId))
+    ) {
+      if (!postSelection.isSelected) {
+        postsToSelect.add(postSelection);
+      }
     } else if (postSelection.isSelected) {
       postsToRemove.add(postSelection.postId);
+    }
+    const modCount = postsToSelect.size + postsToRemove.size;
+    if (++postCount % 100000 === 0 && modCount !== lastReport) {
+      lastReport = modCount;
+      console.log(
+        'Checked', postCount, 'posts and will modify', modCount, 'selections'
+      );
     }
   }
 
@@ -337,4 +344,12 @@ function acceptablePost(post: PostSelection): boolean {
   return false;
 }
 
-loader().then(selector);
+function hasAcceptableTags(tags: string[]): boolean {
+  for (const tag of tags) {
+    if (EXCLUDED_TAGS.has(tag)) return false;
+  }
+  return true;
+}
+
+// loader().then(selector);
+selector();
