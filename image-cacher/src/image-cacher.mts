@@ -7,76 +7,87 @@ import {Readable} from 'node:stream';
 import {setTimeout} from 'node:timers/promises';
 
 import {Database, DownloadablePost, openDatabase} from './database.mjs';
+import {QueueProcessor} from './queue-processor.mjs';
 
 const OLD_CACHE_PATH = '/var/e621-cache/image-data/images';
 const NEW_CACHE_PATH = '/var/awoo/images';
 const E621_STATIC_PATH = 'https://static1.e621.net/data';
 const DOWNLOAD_DELAY = 5 * 1000; // 5 seconds in milliseconds
 
-class DownloadQueue {
-  private readonly queue: DownloadablePost[] = [];
-  private downloadPromise?: Promise<void> = null;
-  private downloadedPostCount = 0;
+class DownloadQueue extends QueueProcessor<DownloadablePost> {
+  private _downloadedPostCount = 0;
 
-  constructor(private readonly db: Database) {}
+  constructor(private readonly db: Database) {
+    super((post) => this._download(post));
+  }
 
-  push(post: DownloadablePost) {
-    this.queue.push(post);
-    if (!this.downloadPromise) {
-      this.downloadPromise = this._download();
+  get downloadedPostCount() { return this._downloadedPostCount; }
+
+  private async _download(post: DownloadablePost) {
+    await setTimeout(DOWNLOAD_DELAY);
+    const postFolder1 = post.md5.substring(0, 2);
+    const postFolder2 = post.md5.substring(2, 4);
+    const postUrl = path.join(
+      E621_STATIC_PATH,
+      postFolder1,
+      postFolder2,
+      `${post.md5}.${post.extension}`
+    );
+    try {
+      console.log(
+        'Downloading', post.postId, ';', this.size, 'posts queued;',
+        this._downloadedPostCount, 'posts downloaded.'
+      );
+      const res = await axios<Readable>({
+        method: 'get',
+        url: postUrl,
+        responseType: 'stream'
+      });
+      if (res.status !== 200) {
+        console.error('Failed to download post', post.postId, res.status);
+        return;
+      }
+      await saveStream(post, res.data);
+
+      if (await getFileHash(getPostPath(post)) !== post.md5) {
+        console.error('Download of', post.postId, 'corrupted!');
+        return;
+      }
+
+      ++this._downloadedPostCount;
+      await this.db.markPostDownloaded(post.postId);
+    } catch (err) {
+      if (err.response?.status === 404) {
+        console.error('Post', post.postId, 'not found. MD5:', post.md5);
+      } else {
+        console.error('Failed to download post', post.postId, err);
+      }
     }
   }
+}
 
-  async flush(): Promise<number> {
-    if (this.downloadPromise) await this.downloadPromise;
-    return this.downloadedPostCount;
+class ValidationQueue extends QueueProcessor<DownloadablePost> {
+  private _redownloadedCount = 0;
+
+  constructor(
+    private readonly db: Database,
+    private readonly downloadQueue: DownloadQueue
+  ) {
+    super((post) => this._validateImage(post));
   }
 
-  async _download() {
-    do {
-      await setTimeout(DOWNLOAD_DELAY);
+  get redownloadedCount() { return this._redownloadedCount; }
 
-      const post = this.queue.shift();
-      const postFolder1 = post.md5.substring(0, 2);
-      const postFolder2 = post.md5.substring(2, 4);
-      const postUrl = path.join(
-        E621_STATIC_PATH,
-        postFolder1,
-        postFolder2,
-        `${post.md5}.${post.extension}`
-      );
-      try {
-        console.log(
-          'Downloading', post.postId, ';', this.queue.length, 'posts queued;',
-          this.downloadedPostCount, 'posts downloaded.'
-        );
-        const res = await axios<Readable>({
-          method: 'get',
-          url: postUrl,
-          responseType: 'stream'
-        });
-        if (res.status !== 200) {
-          console.error('Failed to download post', post.postId, res.status);
-          continue;
-        }
-        await saveStream(post, res.data);
-
-        if (await getFileHash(getPostPath(post)) !== post.md5) {
-          console.error('Download of', post.postId, 'corrupted!');
-          continue;
-        }
-
-        ++this.downloadedPostCount;
-        await this.db.markPostDownloaded(post.postId);
-      } catch (err) {
-        if (err.response?.status === 404) {
-          console.error('Post', post.postId, 'not found. MD5:', post.md5);
-        } else {
-          console.error('Failed to download post', post.postId, err);
-        }
-      }
-    } while (this.queue.length > 0);
-    this.downloadPromise = null;
+  private async _validateImage(post: DownloadablePost) {
+    const postPath = getPostPath(post);
+    if (await tryGetFileHash(postPath) === post.md5) return;
+    console.log('Post', post.postId, 'image changed, removing.');
+    await Promise.all([
+      tryRm(postPath),
+      this.db.unmarkPostDownloaded(post.postId)
+    ]);
+    this.downloadQueue.push(post);
+    ++this._redownloadedCount;
   }
 }
 
@@ -96,17 +107,19 @@ async function imageCacher() {
   }
   console.log(movedPostCount, 'posts moved.');
 
+  const validationQueue = new ValidationQueue(db, downloadQueue);
   for await (post of await db.listDownloadedPosts()) {
-    const postPath = getPostPath(post);
-    if (await getFileHash(postPath) !== post.md5) {
-      console.log('Post', post.postId, 'image changed, removing.');
-      await fs.rm(postPath);
-      await db.unmarkPostDownloaded(post.postId);
-    }
+    validationQueue.push(post);
   }
+  await validationQueue.flush()
+  console.log(
+    'Validated', validationQueue.processedCount, 'posts, reqeueued',
+    validationQueue.redownloadedCount
+  );
 
-  const downloadCount = await downloadQueue.flush();
-  console.log(downloadCount, 'posts downloaded.');
+  if (downloadQueue.size) console.log('Waiting for downloads to complete.');
+  await downloadQueue.flush();
+  console.log(downloadQueue.downloadedPostCount, 'posts downloaded.');
   await db.close();
 }
 
@@ -114,12 +127,7 @@ async function moveDownloadedImage(post: DownloadablePost): Promise<boolean> {
   const postDir = `${post.postId % 1000}`;
   const postFilename = `${post.postId}.${post.extension}`;
   const imagePath = path.join(OLD_CACHE_PATH, postDir, postFilename);
-  try {
-    await fs.access(imagePath, fs.constants.R_OK);
-  } catch {
-    return false;
-  }
-  if (await getFileHash(imagePath) != post.md5) return false;
+  if (await tryGetFileHash(imagePath) !== post.md5) return false;
 
   let destinationPath = path.join(NEW_CACHE_PATH, postDir);
   await fs.mkdir(destinationPath, {recursive: true});
@@ -145,6 +153,20 @@ function getPostPath(post: DownloadablePost): string {
   const postDir = `${post.postId % 1000}`;
   const postFilename = `${post.postId}.${post.extension}`;
   return path.join(NEW_CACHE_PATH, postDir, postFilename);
+}
+
+async function tryRm(filePath: string) {
+  try {
+    await fs.rm(filePath);
+  } catch {}
+}
+
+async function tryGetFileHash(filePath: string): Promise<string|null> {
+  try {
+    return await getFileHash(filePath);
+  } catch {
+    return null;
+  }
 }
 
 function getFileHash(filePath: string): Promise<string> {
